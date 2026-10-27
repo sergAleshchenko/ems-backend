@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ems-postgres-data
+  namespace: ems
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ems-postgres
+  namespace: ems
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: ems-postgres}
+  template:
+    metadata:
+      labels: {app: ems-postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: {name: ems-db}
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, ems, -d, ems]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: ems-postgres-data}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: ems-postgres, namespace: ems}
+spec:
+  selector: {app: ems-postgres}
+  ports: [{port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ems-backend, namespace: ems}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels: {app: ems-backend}
+  template:
+    metadata:
+      labels: {app: ems-backend}
+    spec:
+      containers:
+        - name: backend
+          image: ems-backend:local-1
+          imagePullPolicy: Never
+          ports: [{containerPort: 8080}]
+          env:
+            - {name: SPRING_DATASOURCE_URL, value: 'jdbc:postgresql://ems-postgres:5432/ems'}
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef: {name: ems-db, key: POSTGRES_USER}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ems-db, key: POSTGRES_PASSWORD}
+          readinessProbe:
+            httpGet: {path: /api/employees, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata: {name: ems-backend, namespace: ems}
+spec:
+  selector: {app: ems-backend}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ems-frontend, namespace: ems}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels: {app: ems-frontend}
+  template:
+    metadata:
+      labels: {app: ems-frontend}
+    spec:
+      containers:
+        - name: frontend
+          image: ems-frontend:local-3
+          imagePullPolicy: Never
+          ports: [{containerPort: 80}]
+          readinessProbe:
+            httpGet: {path: /, port: 80}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata: {name: ems-frontend, namespace: ems}
+spec:
+  selector: {app: ems-frontend}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: ems, namespace: ems}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: ems.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ems-frontend
+                port: {number: 80}
